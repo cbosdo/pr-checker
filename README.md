@@ -5,10 +5,8 @@
 
 # GitHub PR Check Runner (`pr-checker`)
 
-`pr-checker` is a lightweight Python CLI tool designed to inspect open GitHub Pull Requests against configurable file pattern rules, identify required status checks, and execute those checks in isolated temporary environments.
-
-It uses local `~/.netrc` credentials for secure authentication—preventing sensitive tokens from leaking into command-line arguments or process inspection logs (`ps`).
-
+`pr-checker` is a lightweight Python CLI tool designed to inspect opened GitHub Pull Requests for check to run.
+It works in two modes: first look for the checks to run among all the PRs and then run each check one by one.
 
 ## Key Features
 
