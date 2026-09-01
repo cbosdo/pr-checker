@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: 2026 SUSE LLC
+# SPDX-FileContributor: Cédric Bosdonnat
+#
+# SPDX-License-Identifier: Apache-2.0
+
 # GitHub PR Check Runner (`pr-checker`)
 
 `pr-checker` is a lightweight Python CLI tool designed to inspect open GitHub Pull Requests against configurable file pattern rules, identify required status checks, and execute those checks in isolated temporary environments.
