@@ -5,6 +5,8 @@
  SPDX-License-Identifier: Apache-2.0
 -->
 
+<img src="images/banner.jpg" width="100%" alt="gh-checker banner">
+
 # GitHub PR Check Runner (`pr-checker`)
 
 `pr-checker` is a lightweight Python CLI tool designed to inspect opened GitHub Pull Requests for check to run.
