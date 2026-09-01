@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: 2026 SUSE LLC
+#
+# SPDX-License-Identifier: Apache-2.0
+version = 1
+SPDX-PackageName = "gh-checker"
+SPDX-PackageSupplier = "Uyuni Project <>"
+SPDX-PackageDownloadLocation = "https://github.com/cbosdo/gh-checker"
+
+[[annotations]]
+path = "images/**"
+precedence = "override"
+SPDX-FileCopyrightText = "2026 SUSE LLC"
+SPDX-License-Identifier = "CC0-1.0"

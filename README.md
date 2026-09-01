@@ -5,10 +5,17 @@
  SPDX-License-Identifier: Apache-2.0
 -->
 
-# GitHub PR Check Runner (`pr-checker`)
+# PR checks runner
 
-`pr-checker` is a lightweight Python CLI tool designed to inspect opened GitHub Pull Requests for check to run.
-It works in two modes: first look for the checks to run among all the PRs and then run each check one by one.
+<img src="images/logo-150.png" alt="gh-checker logo" align="right">
+
+`pr-checker` is a lightweight Python CLI tool designed to inspect opened GitHub Pull Requests for checks to run.
+It works in two modes:
+
+* `list` looks for the checks to run among all the opened PRs.
+* `run` executes each check one by one in a temporary shallow clone of the PR.
+
+<div style="clear: both;"/>
 
 ## Key Features
 
