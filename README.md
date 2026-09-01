@@ -1,7 +1,9 @@
-# SPDX-FileCopyrightText: 2026 SUSE LLC
-# SPDX-FileContributor: Cédric Bosdonnat
-#
-# SPDX-License-Identifier: Apache-2.0
+<!--
+ SPDX-FileCopyrightText: 2026 SUSE LLC
+ SPDX-FileContributor: Cédric Bosdonnat
+
+ SPDX-License-Identifier: Apache-2.0
+-->
 
 # GitHub PR Check Runner (`pr-checker`)
 
