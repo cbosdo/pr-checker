@@ -1,0 +1,31 @@
+# SPDX-FileCopyrightText: 2026 SUSE LLC
+# SPDX-FileContributor: Cédric Bosdonnat
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pr-checker"
+version = "0.1.0"
+description = "A CLI tool to evaluate and execute PR checks on GitHub."
+readme = "README.md"
+requires-python = ">=3.6"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Developer" }
+]
+
+dependencies = [
+    "PyGithub>=1.59.0",
+    "GitPython>=3.1.30",
+    "click>=8.0.0",
+]
+
+[project.scripts]
+pr-checker = "pr_checker:main"
+
+[tool.setuptools]
+py-modules = ["pr_checker"]

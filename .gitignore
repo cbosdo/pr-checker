@@ -1,0 +1,8 @@
+# SPDX-FileCopyrightText: 2026 SUSE LLC
+# SPDX-FileContributor: Cédric Bosdonnat
+#
+# SPDX-License-Identifier: Apache-2.0
+
+*.egg-info
+__pycache__
+*.json
