@@ -2,16 +2,21 @@
 # SPDX-FileContributor: Cédric Bosdonnat
 #
 # SPDX-License-Identifier: Apache-2.0
+"""
+pr-checker main module
+"""
 
-import click
+import fnmatch
 import json
 import logging
 import os.path
 import re
 import subprocess
 import tempfile
-from typing import List, Dict, Any, Optional
-from github import Auth, Github, Repository, PullRequest, Commit
+from typing import Any, Dict, List, Optional
+
+import click
+from github import Auth, Commit, Github, PullRequest, Repository
 
 
 def setup_logging(level_name: str):
@@ -30,6 +35,11 @@ def setup_logging(level_name: str):
 
 
 class PRContext:
+    """
+    Data class representing a pull request.
+    This object caches the data needed to perform the checks without querying the server every time.
+    """
+
     def __init__(
         self,
         pr: PullRequest.PullRequest,
@@ -53,7 +63,7 @@ class PRContext:
         cls, repo: Repository.Repository, pr: PullRequest.PullRequest
     ) -> "PRContext":
         """Fetches all necessary PR details in a single aggregated pass."""
-        logging.debug(f"Fetching full context for PR #{pr.number}...")
+        logging.debug("Fetching full context for PR #%s...", pr.number)
 
         # Fetch modified filenames
         files = [f.filename for f in pr.get_files()]
@@ -86,7 +96,6 @@ class PRContext:
 
 def matches_patterns(files: List[str], patterns: List[str]) -> bool:
     """Check if any file matches any pattern using fnmatch-style regex."""
-    import fnmatch
 
     for f in files:
         for p in patterns:
@@ -122,39 +131,53 @@ def evaluate_check_run(
     # If check is marked as pending, it shouldn't be rescheduled
     if latest_status and latest_status.state == "pending":
         logging.info(
-            f"PR #{ctx.pr.number}: Check '{check_name}' is currently PENDING. Skipping."
+            "PR #%s: Check '%s' is currently PENDING. Skipping.",
+            ctx.pr.number,
+            check_name,
         )
         return False
 
     # Magic comment check
     if has_magic_comment(ctx.comments_text, check_name):
         logging.info(
-            f"PR #{ctx.pr.number}: Found magic comment to rerun '{check_name}'."
+            "PR #%s: Found magic comment to rerun '%s'.",
+            ctx.pr.number,
+            check_name,
         )
         return True
 
     # Checkbox check in body
     if has_checked_box(ctx.body_text, check_name):
-        logging.info(f"PR #{ctx.pr.number}: Found checked box to rerun '{check_name}'.")
+        logging.info(
+            "PR #%s: Found checked box to rerun '%s'.",
+            ctx.pr.number,
+            check_name,
+        )
         return True
 
     # File patterns match AND (never ran OR ran before last commit)
     if matches_patterns(ctx.files, patterns):
         if not latest_status:
             logging.info(
-                f"PR #{ctx.pr.number}: Check '{check_name}' has never been run."
+                "PR #%s: Check '%s' has never been run.",
+                ctx.pr.number,
+                check_name,
             )
             return True
 
         if latest_status.created_at < ctx.commit_date:
             logging.info(
-                f"PR #{ctx.pr.number}: Check '{check_name}' ran before last commit date ({ctx.commit_date})."
+                "PR #%s: Check '%s' ran before last commit date (%s).",
+                ctx.pr.number,
+                check_name,
+                ctx.commit_date,
             )
             return True
-        else:
-            logging.debug(
-                f"PR #{ctx.pr.number}: Check '{check_name}' is already up-to-date."
-            )
+        logging.debug(
+            "PR #%s: Check '%s' is already up-to-date.",
+            ctx.pr.number,
+            check_name,
+        )
 
     return False
 
@@ -205,7 +228,7 @@ def list_prs(ctx, config: str, output: str):
     """Scan open PRs and output a JSON file of required check runs."""
     repo: Repository.Repository = ctx.obj["repo"]
 
-    with open(config, "r") as f:
+    with open(config, "r", encoding="utf-8") as f:
         check_mapping: Dict[str, List[str]] = json.load(f)
 
     results = {}
@@ -214,7 +237,11 @@ def list_prs(ctx, config: str, output: str):
     logging.info("Scanning opened Pull Requests...")
     for pr in open_prs:
         logging.debug(
-            f"#{pr.number} #{pr.title} (head: {pr.head.sha[:7]}) #{pr.html_url}"
+            "#%s %s (head: %s) %s",
+            pr.number,
+            pr.title,
+            pr.head.sha[:7],
+            pr.html_url,
         )
         pr_context = PRContext.fetch(repo, pr)
         required_checks = []
@@ -229,11 +256,11 @@ def list_prs(ctx, config: str, output: str):
                 "checks_to_run": required_checks,
             }
 
-    with open(output, "w") as f:
+    with open(output, "w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
 
-    logging.info(f"List complete. Matched {len(results)} PRs requiring checks.")
-    logging.info(f"Results written to '{output}'.")
+    logging.info("List complete. Matched %d PRs requiring checks.", len(results))
+    logging.info("Results written to '%s'.", output)
 
 
 @cli.command("run")
@@ -263,9 +290,9 @@ def run_check(ctx, pr: int, check_name: str, command: str, build_url: Optional[s
     success = False
     try:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            logging.debug(f"Created temporary workspace: {tmp_dir}")
+            logging.debug("Created temporary workspace: %s", tmp_dir)
 
-            logging.info(f"Fetching commit {head_sha[:7]} via shallow clone...")
+            logging.info("Fetching commit %s via shallow clone...", head_sha[:7])
             subprocess.run(
                 [
                     "git",
@@ -286,20 +313,23 @@ def run_check(ctx, pr: int, check_name: str, command: str, build_url: Optional[s
             )
 
             # Mark check status as pending
-            logging.info(f"Updating GitHub status context '{check_name}' to PENDING...")
+            logging.info(
+                "Updating GitHub status context '%s' to PENDING...", check_name
+            )
             head_commit.create_status(state="pending", **status_kwargs)
 
-            logging.info(f"Executing command: '{command}'")
+            logging.info("Executing command: '%s'", command)
             result = subprocess.run(
                 command,
                 shell=True,
+                check=False,
                 cwd=os.path.join(tmp_dir, "clone"),
             )
 
             success = result.returncode == 0
 
-    except Exception as e:
-        logging.error(f"Execution failed with error: {e}")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+        logging.error("Execution failed with error: %s", e)
         success = False
 
     # Mark final status
@@ -311,12 +341,17 @@ def run_check(ctx, pr: int, check_name: str, command: str, build_url: Optional[s
     head_commit.create_status(state=final_state, **status_kwargs)
 
     logging.info(
-        f"Check '{check_name}' completed. Updated GitHub status state to: {final_state.upper()}"
+        "Check '%s' completed. Updated GitHub status state to: %s",
+        check_name,
+        final_state.upper(),
     )
 
 
 def main():
-    cli()
+    """
+    Main entry point for pr-checker.
+    """
+    cli()  # pylint: disable=no-value-for-parameter
 
 
 if __name__ == "__main__":

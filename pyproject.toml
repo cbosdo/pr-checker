@@ -24,6 +24,13 @@ dependencies = [
     "click>=8.0.0",
 ]
 
+[project.optional-dependencies]
+dev = [
+    "black",
+    "isort",
+    "pylint",
+]
+
 [project.scripts]
 pr-checker = "pr_checker:main"
 
