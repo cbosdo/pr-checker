@@ -19,7 +19,7 @@ authors = [
 ]
 
 dependencies = [
-    "PyGithub>=1.59.0",
+    "PyGithub>=1.57.0",
     "click>=8.0.0",
 ]
 
