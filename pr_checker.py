@@ -9,14 +9,16 @@ pr-checker main module
 import fnmatch
 import json
 import logging
+import netrc
 import os.path
 import re
 import subprocess
+import sys
 import tempfile
 from typing import Any, Dict, List, Optional
 
 import click
-from github import Auth, Commit, Github, PullRequest, Repository
+from github import Commit, Github, PullRequest, Repository
 
 
 def setup_logging(level_name: str):
@@ -27,6 +29,26 @@ def setup_logging(level_name: str):
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%H:%M:%S",
     )
+
+
+def get_netrc_auth():
+    """Fetch api.github.com token from ~/.netrc"""
+    try:
+        logging.debug("Reading netrc credentials for api.github.com")
+        netrc_info = netrc.netrc()
+        auth = netrc_info.authenticators("api.github.com")
+
+        if not auth:
+            raise ValueError("No entry found for 'api.github.com' in ~/.netrc file.")
+
+        _, _, token = auth
+        return token
+    except FileNotFoundError:
+        logging.error("~/.netrc file not found.")
+        sys.exit(1)
+    except netrc.NetrcParseError as e:
+        logging.error("Error reading ~/.netrc: %s", e)
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +226,8 @@ def cli(ctx, repo: str, log_level: str):
     setup_logging(log_level)
 
     # Initialize PyGithub using netrc token
-    gh = Github(auth=Auth.NetrcAuth())
+    token = get_netrc_auth()
+    gh = Github(token)
 
     # Initialize GitHub connection and pass context down to subcommands
     ctx.obj = {"repo": gh.get_repo(repo)}
