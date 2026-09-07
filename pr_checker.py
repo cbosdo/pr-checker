@@ -405,6 +405,9 @@ def run_check(
         final_state.upper(),
     )
 
+    # Reflect the test status in the exit code for automation to use it
+    sys.exit(0 if success else 1)
+
 
 def main():
     """
