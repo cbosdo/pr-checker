@@ -307,6 +307,12 @@ def list_prs(ctx, config: str, output: str, pr: Tuple[str]):
     "--build-url", default=None, help="URL to the build log to be set in the PR check."
 )
 @click.option("--description", help="Test description to set on the Github check.")
+@click.option(
+    "--git-dir",
+    default=None,
+    type=click.Path(file_okay=False, writable=True),
+    help="Git clone directory to use instead of a temporary directory.",
+)
 @click.pass_context
 def run_check(
     ctx,
@@ -315,6 +321,7 @@ def run_check(
     command: str,
     build_url: Optional[str],
     description: Optional[str],
+    git_dir: Optional[str],
 ):
     """Checkout a PR to a temporary directory, run a check, and post status."""
     repo: Repository.Repository = ctx.obj["repo"]
@@ -331,46 +338,51 @@ def run_check(
     if build_url:
         status_kwargs["target_url"] = build_url
 
+    def _execute_check(target_dir: str):
+        if git_dir:
+            os.makedirs(git_dir)
+
+        logging.info("Fetching commit %s via shallow clone...", head_sha[:7])
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "credential.helper=store",
+                "-c",
+                "credential.netrcFile=~/.netrc",
+                "clone",
+                "--depth=1",
+                f"--revision={head_sha}",
+                repo.clone_url,
+                target_dir,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        # Mark check status as pending
+        logging.info("Updating GitHub status context '%s' to PENDING...", check_name)
+        head_commit.create_status(state="pending", **status_kwargs)
+
+        logging.info("Executing command: '%s'", command)
+        result = subprocess.run(
+            command,
+            shell=True,
+            check=False,
+            cwd=target_dir,
+        )
+
+        return result.returncode == 0
+
     success = False
     try:
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            logging.debug("Created temporary workspace: %s", tmp_dir)
-
-            logging.info("Fetching commit %s via shallow clone...", head_sha[:7])
-            subprocess.run(
-                [
-                    "git",
-                    "-c",
-                    "credential.helper=store",
-                    "-c",
-                    "credential.netrcFile=~/.netrc",
-                    "clone",
-                    "--depth=1",
-                    f"--revision={head_sha}",
-                    repo.clone_url,
-                    "clone",
-                ],
-                cwd=tmp_dir,
-                check=True,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-            # Mark check status as pending
-            logging.info(
-                "Updating GitHub status context '%s' to PENDING...", check_name
-            )
-            head_commit.create_status(state="pending", **status_kwargs)
-
-            logging.info("Executing command: '%s'", command)
-            result = subprocess.run(
-                command,
-                shell=True,
-                check=False,
-                cwd=os.path.join(tmp_dir, "clone"),
-            )
-
-            success = result.returncode == 0
+        if git_dir:
+            success = _execute_check(git_dir)
+        else:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                logging.debug("Created temporary workspace: %s", tmp_dir)
+                success = _execute_check(tmp_dir)
 
     except Exception as e:  # pylint: disable=broad-exception-caught
         logging.error("Execution failed with error: %s", e)
