@@ -305,8 +305,16 @@ def list_prs(ctx, config: str, output: str, pr: Tuple[str]):
 @click.option(
     "--build-url", default=None, help="URL to the build log to be set in the PR check."
 )
+@click.option("--description", help="Test description to set on the Github check.")
 @click.pass_context
-def run_check(ctx, pr: int, check_name: str, command: str, build_url: Optional[str]):
+def run_check(
+    ctx,
+    pr: int,
+    check_name: str,
+    command: str,
+    build_url: Optional[str],
+    description: Optional[str],
+):
     """Checkout a PR to a temporary directory, run a check, and post status."""
     repo: Repository.Repository = ctx.obj["repo"]
 
@@ -368,11 +376,14 @@ def run_check(ctx, pr: int, check_name: str, command: str, build_url: Optional[s
         success = False
 
     # Mark final status
-    final_state = "success" if success else "failure"
-    status_kwargs["description"] = (
-        "Check passed successfully!" if success else "Check failed."
-    )
+    if not description:
+        status_kwargs["description"] = (
+            "Check passed successfully!" if success else "Check failed."
+        )
+    else:
+        status_kwargs["description"] = description
 
+    final_state = "success" if success else "failure"
     head_commit.create_status(state=final_state, **status_kwargs)
 
     logging.info(
