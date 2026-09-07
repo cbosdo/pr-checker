@@ -15,7 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import click
 from github import Commit, Github, PullRequest, Repository
@@ -118,6 +118,11 @@ class PRContext:
 
 def matches_patterns(files: List[str], patterns: List[str]) -> bool:
     """Check if any file matches any pattern using fnmatch-style regex."""
+    logging.debug(
+        "matches_pattern() files: %s, patters: %s",
+        ", ".join(files),
+        ", ".join(patterns),
+    )
 
     for f in files:
         for p in patterns:
@@ -246,8 +251,14 @@ def cli(ctx, repo: str, log_level: str):
     show_default=True,
     help="Destination path for the output JSON file.",
 )
+@click.option(
+    "--pr",
+    type=int,
+    multiple=True,
+    help="Only check the Pull Requests matching these numbers.",
+)
 @click.pass_context
-def list_prs(ctx, config: str, output: str):
+def list_prs(ctx, config: str, output: str, pr: Tuple[str]):
     """Scan open PRs and output a JSON file of required check runs."""
     repo: Repository.Repository = ctx.obj["repo"]
 
@@ -256,17 +267,18 @@ def list_prs(ctx, config: str, output: str):
 
     results = {}
     open_prs = repo.get_pulls(state="open")
+    open_prs = [p for p in open_prs if p.number in pr]
 
     logging.info("Scanning opened Pull Requests...")
-    for pr in open_prs:
+    for open_pr in open_prs:
         logging.debug(
             "#%s %s (head: %s) %s",
-            pr.number,
-            pr.title,
-            pr.head.sha[:7],
-            pr.html_url,
+            open_pr.number,
+            open_pr.title,
+            open_pr.head.sha[:7],
+            open_pr.html_url,
         )
-        pr_context = PRContext.fetch(repo, pr)
+        pr_context = PRContext.fetch(repo, open_pr)
         required_checks = []
 
         for check_name, patterns in check_mapping.items():
@@ -274,8 +286,8 @@ def list_prs(ctx, config: str, output: str):
                 required_checks.append(check_name)
 
         if required_checks:
-            results[pr.number] = {
-                "head_sha": pr.head.sha,
+            results[open_pr.number] = {
+                "head_sha": open_pr.head.sha,
                 "checks_to_run": required_checks,
             }
 
