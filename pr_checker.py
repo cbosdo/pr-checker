@@ -139,7 +139,7 @@ def has_magic_comment(comments_text: str, check_name: str) -> bool:
 
 def has_checked_box(body_text: str, check_name: str) -> bool:
     """Check if 'Re-run test "<check_name>"' is checked in the PR body."""
-    if body_text:
+    if not body_text:
         return False
     pattern = re.compile(
         rf"\[[xX]\]\s*Re-run\s+test\s+\"{re.escape(check_name)}\"", re.IGNORECASE
@@ -267,7 +267,8 @@ def list_prs(ctx, config: str, output: str, pr: Tuple[str]):
 
     results = {}
     open_prs = repo.get_pulls(state="open")
-    open_prs = [p for p in open_prs if p.number in pr]
+    if pr:
+        open_prs = [p for p in open_prs if p.number in pr]
 
     logging.info("Scanning opened Pull Requests...")
     for open_pr in open_prs:
