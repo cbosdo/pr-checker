@@ -30,7 +30,7 @@ jobs:
 
       - name: Check code formatting with Black
         run: |
-          black --check .
+          black --fast --check .
 
       - name: Check import ordering with isort
         run: |
