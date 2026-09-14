@@ -55,7 +55,7 @@ Check the following top-level scope:
 
 Create or update your `~/.netrc` file in your home directory (`~/.netrc` on Linux/macOS or `%HOME%\_netrc` on Windows). 
 
-Because `PyGithub` targets `api.github.com` and `git clone` targets `github.com`, **both machine entries must be defined** in your `.netrc` file using your token:
+Because the API targets `api.github.com` and `git clone` targets `github.com`, **both machine entries must be defined** in your `.netrc` file using your token:
 
 ```text
 machine api.github.com

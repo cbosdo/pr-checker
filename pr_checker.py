@@ -10,15 +10,16 @@ import fnmatch
 import json
 import logging
 import netrc
-import os.path
+import os
 import re
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 import click
-from github import Commit, Github, PullRequest, Repository
 
 
 def setup_logging(level_name: str):
@@ -56,6 +57,148 @@ def get_netrc_auth():
 # ---------------------------------------------------------------------------
 
 
+GRAPHQL_URL = "https://api.github.com/graphql"
+
+PR_BATCH_QUERY = """
+query($owner: String!, $repo: String!, $cursor: String) {
+  repository(owner: $owner, name: $repo) {
+    pullRequests(states: OPEN, first: 50, after: $cursor) {
+      pageInfo {
+        hasNextPage
+        endCursor
+      }
+      nodes {
+        number
+        title
+        body
+        url
+        headRefOid
+        files(first: 100) {
+          nodes {
+            path
+          }
+        }
+        comments(last: 50) {
+          nodes {
+            body
+          }
+        }
+        commits(last: 1) {
+          nodes {
+            commit {
+              committedDate
+              status {
+                contexts {
+                  context
+                  state
+                  createdAt
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+PR_SINGLE_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    url
+    pullRequest(number: $number) {
+      headRefOid
+      headRepository {
+        url
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            id
+          }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def execute_graphql(
+    query: str, variables: Dict[str, Any], token: str
+) -> Dict[str, Any]:
+    """Sends a GraphQL POST request using standard urllib."""
+    headers = {
+        "Authorization": f"bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "pr-checker",
+    }
+    logging.debug("Executing GraphQL query (%s): %s", variables, query)
+    payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
+    req = urllib.request.Request(GRAPHQL_URL, data=payload, headers=headers)
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        logging.error(
+            "GraphQL request failed with status %s: %s", e.code, e.read().decode()
+        )
+        sys.exit(1)
+
+    if "errors" in result:
+        logging.error("GraphQL errors: %s", result["errors"])
+        sys.exit(1)
+
+    return result["data"]
+
+
+def create_commit_status(
+    owner: str,
+    repo: str,
+    sha: str,
+    state: str,
+    context: str,
+    description: str,
+    token: str,
+    target_url: Optional[str] = None,
+):
+    """Posts a commit status via GitHub REST API v3."""
+    url = f"https://api.github.com/repos/{owner}/{repo}/statuses/{sha}"
+    headers = {
+        "Authorization": f"token {token}",
+        "Accept": "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+        "User-Agent": "pr-checker",
+    }
+
+    payload = {
+        "state": state.lower(),
+        "context": context,
+        "description": description,
+    }
+    if target_url:
+        payload["target_url"] = target_url
+
+    logging.debug("Creating status: %s", payload)
+    req = urllib.request.Request(
+        url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(req) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        logging.error(
+            "Failed to post status context '%s' via REST API (%s): %s",
+            context,
+            e.code,
+            e.read().decode(),
+        )
+        sys.exit(1)
+
+
 class PRContext:
     """
     Data class representing a pull request.
@@ -64,56 +207,84 @@ class PRContext:
 
     def __init__(
         self,
-        pr: PullRequest.PullRequest,
+        number: int,
+        title: str,
+        head_sha: str,
+        html_url: str,
         files: List[str],
         comments_text: str,
         body_text: str,
-        head_commit: Commit.Commit,
         statuses: Dict[str, Any],
-        commit_date: Any,
+        commit_date: str,
     ):
-        self.pr = pr
+        self.number = number
+        self.title = title
+        self.head_sha = head_sha
+        self.html_url = html_url
         self.files = files
         self.comments_text = comments_text
         self.body_text = body_text
-        self.head_commit = head_commit
         self.statuses = statuses
         self.commit_date = commit_date
 
-    @classmethod
-    def fetch(
-        cls, repo: Repository.Repository, pr: PullRequest.PullRequest
-    ) -> "PRContext":
-        """Fetches all necessary PR details in a single aggregated pass."""
-        logging.debug("Fetching full context for PR #%s...", pr.number)
 
-        # Fetch modified filenames
-        files = [f.filename for f in pr.get_files()]
+def fetch_all_pr_contexts_graphql(
+    owner: str, repo_name: str, token: str, filter_prs: Optional[Tuple[int, ...]] = None
+) -> List[PRContext]:
+    """Fetches full evaluation contexts for open PRs in batched GraphQL requests."""
+    contexts = []
+    has_next_page = True
+    cursor = None
 
-        # Fetch issue comments into a single joined body for fast regex checking
-        comments = [c.body for c in pr.get_issue_comments() if c.body]
-        comments_text = "\n".join(comments)
-
-        # Get head commit and extract statuses map (latest status per check context)
-        head_commit = repo.get_commit(pr.head.sha)
-        commit_date = head_commit.commit.committer.date
-
-        statuses = {}
-        for s in head_commit.get_statuses():
-            if s.context not in statuses:
-                statuses[s.context] = (
-                    s  # PyGithub presents statuses reverse-chronologically
-                )
-
-        return cls(
-            pr=pr,
-            files=files,
-            comments_text=comments_text,
-            body_text=pr.body or "",
-            head_commit=head_commit,
-            statuses=statuses,
-            commit_date=commit_date,
+    while has_next_page:
+        data = execute_graphql(
+            PR_BATCH_QUERY,
+            {"owner": owner, "repo": repo_name, "cursor": cursor},
+            token,
         )
+        pr_connection = data["repository"]["pullRequests"]
+
+        for pr_node in pr_connection["nodes"]:
+            pr_num = pr_node["number"]
+
+            # Filter in memory if user supplied specific --pr flags
+            if filter_prs and pr_num not in filter_prs:
+                continue
+
+            files = [f["path"] for f in pr_node["files"]["nodes"]]
+            comments = [
+                c["body"] for c in pr_node["comments"]["nodes"] if c.get("body")
+            ]
+
+            commit_node = pr_node["commits"]["nodes"][0]["commit"]
+            commit_date = commit_node["committedDate"]
+
+            # Parse Status contexts
+            statuses = {}
+            status_obj = commit_node.get("status")
+            if status_obj and status_obj.get("contexts"):
+                for ctx in status_obj["contexts"]:
+                    if ctx["context"] not in statuses:
+                        statuses[ctx["context"]] = ctx
+
+            contexts.append(
+                PRContext(
+                    number=pr_num,
+                    title=pr_node["title"],
+                    head_sha=pr_node["headRefOid"],
+                    html_url=pr_node["url"],
+                    files=files,
+                    comments_text="\n".join(comments),
+                    body_text=pr_node["body"] or "",
+                    statuses=statuses,
+                    commit_date=commit_date,
+                )
+            )
+
+        has_next_page = pr_connection["pageInfo"]["hasNextPage"]
+        cursor = pr_connection["pageInfo"]["endCursor"]
+
+    return contexts
 
 
 def matches_patterns(files: List[str], patterns: List[str]) -> bool:
@@ -156,10 +327,10 @@ def evaluate_check_run(
     latest_status = ctx.statuses.get(check_name)
 
     # If check is marked as pending, it shouldn't be rescheduled
-    if latest_status and latest_status.state == "pending":
+    if latest_status and latest_status.get("state", "").lower() == "pending":
         logging.info(
             "PR #%s: Check '%s' is currently PENDING. Skipping.",
-            ctx.pr.number,
+            ctx.number,
             check_name,
         )
         return False
@@ -168,7 +339,7 @@ def evaluate_check_run(
     if has_magic_comment(ctx.comments_text, check_name):
         logging.info(
             "PR #%s: Found magic comment to rerun '%s'.",
-            ctx.pr.number,
+            ctx.number,
             check_name,
         )
         return True
@@ -177,7 +348,7 @@ def evaluate_check_run(
     if has_checked_box(ctx.body_text, check_name):
         logging.info(
             "PR #%s: Found checked box to rerun '%s'.",
-            ctx.pr.number,
+            ctx.number,
             check_name,
         )
         return True
@@ -187,22 +358,22 @@ def evaluate_check_run(
         if not latest_status:
             logging.info(
                 "PR #%s: Check '%s' has never been run.",
-                ctx.pr.number,
+                ctx.number,
                 check_name,
             )
             return True
 
-        if latest_status.created_at < ctx.commit_date:
+        if latest_status.get("createdAt", "") < ctx.commit_date:
             logging.info(
                 "PR #%s: Check '%s' ran before last commit date (%s).",
-                ctx.pr.number,
+                ctx.number,
                 check_name,
                 ctx.commit_date,
             )
             return True
         logging.debug(
             "PR #%s: Check '%s' is already up-to-date.",
-            ctx.pr.number,
+            ctx.number,
             check_name,
         )
 
@@ -230,12 +401,12 @@ def cli(ctx, repo: str, log_level: str):
     """CLI Tool to list and execute PR checks using netrc authentication."""
     setup_logging(log_level)
 
-    # Initialize PyGithub using netrc token
+    # Get the token using netrc
     token = get_netrc_auth()
-    gh = Github(token)
-
-    # Initialize GitHub connection and pass context down to subcommands
-    ctx.obj = {"repo": gh.get_repo(repo)}
+    ctx.obj = {
+        "repo_str": repo,
+        "token": token,
+    }
 
 
 @cli.command("list")
@@ -258,37 +429,39 @@ def cli(ctx, repo: str, log_level: str):
     help="Only check the Pull Requests matching these numbers.",
 )
 @click.pass_context
-def list_prs(ctx, config: str, output: str, pr: Tuple[str]):
+def list_prs(ctx, config: str, output: str, pr: Tuple[int]):
     """Scan open PRs and output a JSON file of required check runs."""
-    repo: Repository.Repository = ctx.obj["repo"]
+    repo_str = ctx.obj["repo_str"]
+    token = ctx.obj["token"]
+
+    owner, repo_name = repo_str.split("/", 1)
 
     with open(config, "r", encoding="utf-8") as f:
         check_mapping: Dict[str, List[str]] = json.load(f)
 
     results = {}
-    open_prs = repo.get_pulls(state="open")
-    if pr:
-        open_prs = [p for p in open_prs if p.number in pr]
+    logging.info("Scanning opened Pull Requests via GitHub GraphQL API...")
+    pr_contexts = fetch_all_pr_contexts_graphql(
+        owner=owner, repo_name=repo_name, token=token, filter_prs=pr if pr else None
+    )
 
-    logging.info("Scanning opened Pull Requests...")
-    for open_pr in open_prs:
+    for pr_ctx in pr_contexts:
         logging.debug(
             "#%s %s (head: %s) %s",
-            open_pr.number,
-            open_pr.title,
-            open_pr.head.sha[:7],
-            open_pr.html_url,
+            pr_ctx.number,
+            pr_ctx.title,
+            pr_ctx.head_sha[:7],
+            pr_ctx.html_url,
         )
-        pr_context = PRContext.fetch(repo, open_pr)
         required_checks = []
 
         for check_name, patterns in check_mapping.items():
-            if evaluate_check_run(pr_context, check_name, patterns):
+            if evaluate_check_run(pr_ctx, check_name, patterns):
                 required_checks.append(check_name)
 
         if required_checks:
-            results[open_pr.number] = {
-                "head_sha": open_pr.head.sha,
+            results[pr_ctx.number] = {
+                "head_sha": pr_ctx.head_sha,
                 "checks_to_run": required_checks,
             }
 
@@ -324,19 +497,20 @@ def run_check(
     git_dir: Optional[str],
 ):
     """Checkout a PR to a temporary directory, run a check, and post status."""
-    repo: Repository.Repository = ctx.obj["repo"]
+    repo_str = ctx.obj["repo_str"]
+    token = ctx.obj["token"]
+    owner, repo_name = repo_str.split("/", 1)
 
-    pull_request = repo.get_pull(pr)
-    head_sha = pull_request.head.sha
-    head_commit = repo.get_commit(head_sha)
+    pr_data = execute_graphql(
+        PR_SINGLE_QUERY,
+        {"owner": owner, "repo": repo_name, "number": pr},
+        token,
+    )
 
-    # Base status parameters dictionary
-    status_kwargs = {
-        "context": check_name,
-        "description": "Check is currently running...",
-    }
-    if build_url:
-        status_kwargs["target_url"] = build_url
+    pr_node = pr_data["repository"]["pullRequest"]
+    head_sha = pr_node["headRefOid"]
+
+    clone_url = pr_node["headRepository"]["url"] + ".git"
 
     def _execute_check(target_dir: str):
         if git_dir:
@@ -353,7 +527,7 @@ def run_check(
                 "clone",
                 "--depth=1",
                 f"--revision={head_sha}",
-                repo.clone_url,
+                clone_url,
                 target_dir,
             ],
             check=True,
@@ -363,7 +537,16 @@ def run_check(
 
         # Mark check status as pending
         logging.info("Updating GitHub status context '%s' to PENDING...", check_name)
-        head_commit.create_status(state="pending", **status_kwargs)
+        create_commit_status(
+            owner=owner,
+            repo=repo_name,
+            sha=head_sha,
+            state="pending",
+            context=check_name,
+            description="Check is currently running...",
+            token=token,
+            target_url=build_url,
+        )
 
         logging.info("Executing command: '%s'", command)
         result = subprocess.run(
@@ -389,15 +572,21 @@ def run_check(
         success = False
 
     # Mark final status
-    if not description:
-        status_kwargs["description"] = (
-            "Check passed successfully!" if success else "Check failed."
-        )
-    else:
-        status_kwargs["description"] = description
-
     final_state = "success" if success else "failure"
-    head_commit.create_status(state=final_state, **status_kwargs)
+    final_desc = description or (
+        "Check passed successfully!" if success else "Check failed."
+    )
+
+    create_commit_status(
+        owner=owner,
+        repo=repo_name,
+        sha=head_sha,
+        state=final_state,
+        context=check_name,
+        description=final_desc,
+        token=token,
+        target_url=build_url,
+    )
 
     logging.info(
         "Check '%s' completed. Updated GitHub status state to: %s",
