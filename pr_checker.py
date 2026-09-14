@@ -107,7 +107,33 @@ query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     url
     pullRequest(number: $number) {
+      id
+      body
       headRefOid
+    }
+  }
+}
+"""
+
+PR_BODY_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+      body
+    }
+  }
+}
+"""
+
+UPDATE_PR_BODY_MUTATION = """
+mutation($prId: ID!, $body: String!) {
+  updatePullRequest(input: {
+    pullRequestId: $prId,
+    body: $body
+  }) {
+    pullRequest {
+      id
     }
   }
 }
@@ -224,6 +250,53 @@ def create_commit_status(
 
     raw_data = execute_with_retry(req)
     return json.loads(raw_data.decode("utf-8"))
+
+
+def uncheck_rerun_boxes(
+    owner: str, repo: str, pr_number: int, check_names: List[str], token: str
+):
+    """Fetches the latest PR body right before updating, unchecking all requested boxes at once."""
+    if not check_names:
+        return
+
+    # Fresh fetch of the PR body right before modifying it to eliminate races
+    data = execute_graphql(
+        PR_BODY_QUERY,
+        {"owner": owner, "repo": repo, "number": pr_number},
+        token,
+    )
+
+    pr_node = data["repository"]["pullRequest"]
+    pr_id = pr_node["id"]
+    body_text = pr_node.get("body") or ""
+
+    if not body_text:
+        return
+
+    updated_body = body_text
+    modified = False
+
+    # Iterate through all checks scheduled for this PR and replace '[x]' or '[X]' with '[ ]'
+    for check_name in check_names:
+        pattern = re.compile(
+            rf"\[[xX]\](\s*Re-run\s+test\s+\"{re.escape(check_name)}\")", re.IGNORECASE
+        )
+        if pattern.search(updated_body):
+            updated_body = pattern.sub(r"[ ]\1", updated_body)
+            modified = True
+            logging.info(
+                "Unticking re-run checkbox for '%s' in PR #%d description...",
+                check_name,
+                pr_number,
+            )
+
+    # Perform a single GraphQL mutation if any boxes were unticked
+    if modified:
+        execute_graphql(
+            UPDATE_PR_BODY_MUTATION,
+            {"prId": pr_id, "body": updated_body},
+            token,
+        )
 
 
 class PRContext:
@@ -481,6 +554,15 @@ def list_prs(ctx, config: str, output: str, pr: Tuple[int]):
                 required_checks.append(check_name)
 
         if required_checks:
+            # Untick all checkboxes at once now: doing it in run could lead to even more races
+            uncheck_rerun_boxes(
+                owner=owner,
+                repo=repo_name,
+                pr_number=pr_ctx.number,
+                check_names=required_checks,
+                token=token,
+            )
+
             results[pr_ctx.number] = {
                 "head_sha": pr_ctx.head_sha,
                 "checks_to_run": required_checks,
@@ -530,6 +612,7 @@ def run_check(
 
     pr_node = pr_data["repository"]["pullRequest"]
     head_sha = pr_node["headRefOid"]
+    logging.debug("pr data: %s", pr_node)
 
     def _execute_check(target_dir: str):
         if git_dir:
