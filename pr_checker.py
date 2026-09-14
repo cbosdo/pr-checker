@@ -82,11 +82,6 @@ query($owner: String!, $repo: String!, $cursor: String) {
             path
           }
         }
-        comments(last: 50) {
-          nodes {
-            body
-          }
-        }
         commits(last: 1) {
           nodes {
             commit {
@@ -244,7 +239,6 @@ class PRContext:
         head_sha: str,
         html_url: str,
         files: List[str],
-        comments_text: str,
         paged_files: bool,
         body_text: str,
         statuses: Dict[str, Any],
@@ -255,7 +249,6 @@ class PRContext:
         self.head_sha = head_sha
         self.html_url = html_url
         self.files = files
-        self.comments_text = comments_text
         self.paged_files = paged_files
         self.body_text = body_text
         self.statuses = statuses
@@ -286,9 +279,6 @@ def fetch_all_pr_contexts_graphql(
                 continue
 
             files = [f["path"] for f in pr_node["files"]["nodes"]]
-            comments = [
-                c["body"] for c in pr_node["comments"]["nodes"] if c.get("body")
-            ]
 
             commit_node = pr_node["commits"]["nodes"][0]["commit"]
             commit_date = commit_node["committedDate"]
@@ -306,7 +296,6 @@ def fetch_all_pr_contexts_graphql(
                     head_sha=pr_node["headRefOid"],
                     html_url=pr_node["url"],
                     files=files,
-                    comments_text="\n".join(comments),
                     paged_files=pr_node["files"]["pageInfo"]["hasNextPage"],
                     body_text=pr_node["body"] or "",
                     statuses=statuses,
@@ -374,15 +363,6 @@ def evaluate_check_run(
             check_name,
         )
         return False
-
-    # Magic comment check
-    if has_magic_comment(ctx.comments_text, check_name):
-        logging.info(
-            "PR #%s: Found magic comment to rerun '%s'.",
-            ctx.number,
-            check_name,
-        )
-        return True
 
     # Checkbox check in body
     if has_checked_box(ctx.body_text, check_name):
