@@ -74,6 +74,9 @@ query($owner: String!, $repo: String!, $cursor: String) {
         url
         headRefOid
         files(first: 100) {
+          pageInfo {
+            hasNextPage
+          }
           nodes {
             path
           }
@@ -213,6 +216,7 @@ class PRContext:
         html_url: str,
         files: List[str],
         comments_text: str,
+        paged_files: bool,
         body_text: str,
         statuses: Dict[str, Any],
         commit_date: str,
@@ -223,6 +227,7 @@ class PRContext:
         self.html_url = html_url
         self.files = files
         self.comments_text = comments_text
+        self.paged_files = paged_files
         self.body_text = body_text
         self.statuses = statuses
         self.commit_date = commit_date
@@ -275,6 +280,7 @@ def fetch_all_pr_contexts_graphql(
                     html_url=pr_node["url"],
                     files=files,
                     comments_text="\n".join(comments),
+                    paged_files=pr_node["files"]["pageInfo"]["hasNextPage"],
                     body_text=pr_node["body"] or "",
                     statuses=statuses,
                     commit_date=commit_date,
@@ -287,15 +293,22 @@ def fetch_all_pr_contexts_graphql(
     return contexts
 
 
-def matches_patterns(files: List[str], patterns: List[str]) -> bool:
+def matches_patterns(ctx: PRContext, patterns: List[str]) -> bool:
     """Check if any file matches any pattern using fnmatch-style regex."""
+    if ctx.paged_files:
+        logging.warning(
+            "PR #%s: Blindly match: more than 100 files changed",
+            ctx.number,
+        )
+        return True
+
     logging.debug(
         "matches_pattern() files: %s, patters: %s",
-        ", ".join(files),
+        ", ".join(ctx.files),
         ", ".join(patterns),
     )
 
-    for f in files:
+    for f in ctx.files:
         for p in patterns:
             if fnmatch.fnmatch(f, p):
                 return True
@@ -354,7 +367,7 @@ def evaluate_check_run(
         return True
 
     # File patterns match AND (never ran OR ran before last commit)
-    if matches_patterns(ctx.files, patterns):
+    if matches_patterns(ctx, patterns):
         if not latest_status:
             logging.info(
                 "PR #%s: Check '%s' has never been run.",
