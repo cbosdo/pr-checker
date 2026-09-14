@@ -113,16 +113,6 @@ query($owner: String!, $repo: String!, $number: Int!) {
     url
     pullRequest(number: $number) {
       headRefOid
-      headRepository {
-        url
-      }
-      commits(last: 1) {
-        nodes {
-          commit {
-            id
-          }
-        }
-      }
     }
   }
 }
@@ -307,9 +297,7 @@ def fetch_all_pr_contexts_graphql(
             statuses = {}
             status_obj = commit_node.get("status")
             if status_obj and status_obj.get("contexts"):
-                for ctx in status_obj["contexts"]:
-                    if ctx["context"] not in statuses:
-                        statuses[ctx["context"]] = ctx
+                statuses = {ctx["context"]: ctx for ctx in status_obj["contexts"]}
 
             contexts.append(
                 PRContext(
@@ -415,6 +403,7 @@ def evaluate_check_run(
             )
             return True
 
+        # Dates are in ISO-8601 UTC, and thus lexicographical and chronological orders are the same
         if latest_status.get("createdAt", "") < ctx.commit_date:
             logging.info(
                 "PR #%s: Check '%s' ran before last commit date (%s).",
@@ -562,8 +551,6 @@ def run_check(
     pr_node = pr_data["repository"]["pullRequest"]
     head_sha = pr_node["headRefOid"]
 
-    clone_url = pr_node["headRepository"]["url"] + ".git"
-
     def _execute_check(target_dir: str):
         if git_dir:
             os.makedirs(git_dir)
@@ -579,7 +566,7 @@ def run_check(
                 "clone",
                 "--depth=1",
                 f"--revision={head_sha}",
-                clone_url,
+                f"{pr_data['repository']['url']}.git",
                 target_dir,
             ],
             check=True,
