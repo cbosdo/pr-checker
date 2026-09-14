@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
@@ -128,6 +129,59 @@ query($owner: String!, $repo: String!, $number: Int!) {
 """
 
 
+def execute_with_retry(
+    req: urllib.request.Request, retries: int = 3, backoff: float = 2.0
+) -> bytes:
+    """Executes a urllib request with exponential backoff on transient errors."""
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                return response.read()
+        except urllib.error.HTTPError as e:
+            # Retry on rate limits (429) or transient server errors (500, 502, 503, 504)
+            if e.code in (403, 429, 500, 502, 503, 504) and attempt < retries:
+                sleep_time = backoff**attempt
+                retry_after_hdr = e.headers.get("Retry-After")
+                if retry_after_hdr and retry_after_hdr.isdigit():
+                    sleep_time = float(retry_after_hdr)
+
+                logging.warning(
+                    "HTTP %s encountered. Retrying in %.1f seconds (Attempt %d/%d)...",
+                    e.code,
+                    sleep_time,
+                    attempt,
+                    retries,
+                )
+                time.sleep(sleep_time)
+                continue
+
+            # Print detailed error and fail immediately for client/auth errors (401, 403, 404, etc.)
+            logging.error(
+                "HTTP Request failed with status %s: %s", e.code, e.read().decode()
+            )
+            sys.exit(1)
+        except urllib.error.URLError as e:
+            # Handle network-level timeouts or connection failures
+            if attempt < retries:
+                sleep_time = backoff**attempt
+                logging.warning(
+                    "Network error (%s). Retrying in %.1f seconds (Attempt %d/%d)...",
+                    e.reason,
+                    sleep_time,
+                    attempt,
+                    retries,
+                )
+                time.sleep(sleep_time)
+                continue
+
+            logging.error(
+                "Network request failed after %d retries: %s", retries, e.reason
+            )
+            sys.exit(1)
+
+    sys.exit(1)
+
+
 def execute_graphql(
     query: str, variables: Dict[str, Any], token: str
 ) -> Dict[str, Any]:
@@ -141,14 +195,8 @@ def execute_graphql(
     payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
     req = urllib.request.Request(GRAPHQL_URL, data=payload, headers=headers)
 
-    try:
-        with urllib.request.urlopen(req) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        logging.error(
-            "GraphQL request failed with status %s: %s", e.code, e.read().decode()
-        )
-        sys.exit(1)
+    raw_data = execute_with_retry(req)
+    result = json.loads(raw_data.decode("utf-8"))
 
     if "errors" in result:
         logging.error("GraphQL errors: %s", result["errors"])
@@ -189,17 +237,8 @@ def create_commit_status(
         url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
     )
 
-    try:
-        with urllib.request.urlopen(req) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        logging.error(
-            "Failed to post status context '%s' via REST API (%s): %s",
-            context,
-            e.code,
-            e.read().decode(),
-        )
-        sys.exit(1)
+    raw_data = execute_with_retry(req)
+    return json.loads(raw_data.decode("utf-8"))
 
 
 class PRContext:
