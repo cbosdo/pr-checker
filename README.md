@@ -24,7 +24,6 @@ It works in two modes:
 - **Smart Re-run Triggers:** Automatically schedules or re-schedules check runs based on:
   - File pattern matches against modified files in the PR.
   - Commits pushed *after* the previous check run date.
-  - Magic comments in the PR discussion (e.g., `rerun <check-name> !!!`).
   - Markdown checkboxes in the PR description (e.g., `- [x] Re-run test "<check-name>"`).
 - **Pending Protection:** Prevents duplicate runs by ignoring checks currently marked as `pending`.
 - **Isolated Execution:** Shallow-clones only the target commit revision using `--depth 1` into a temporary directory before running test commands.
@@ -182,7 +181,6 @@ pr-checker --repo "my-org/my-repo" run \
 
 A check is flagged for execution during a `list` run if **any** of the following conditions evaluate to `true`:
 
-* **Magic Comment:** A comment matching `rerun <check-name> !!!` (case-insensitive) is present in the PR comments.
 * **PR Checkbox:** A checkbox matching `- [x] Re-run test "<check-name>"` is checked in the PR body description.
 * **Modified Files:** Files modified in the PR match the pattern rules in `checks.json` **AND**:
 * The check has never run on the PR, **OR**

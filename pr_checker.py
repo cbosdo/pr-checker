@@ -15,6 +15,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
@@ -74,13 +75,11 @@ query($owner: String!, $repo: String!, $cursor: String) {
         url
         headRefOid
         files(first: 100) {
+          pageInfo {
+            hasNextPage
+          }
           nodes {
             path
-          }
-        }
-        comments(last: 50) {
-          nodes {
-            body
           }
         }
         commits(last: 1) {
@@ -108,21 +107,90 @@ query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     url
     pullRequest(number: $number) {
+      id
+      body
       headRefOid
-      headRepository {
-        url
-      }
-      commits(last: 1) {
-        nodes {
-          commit {
-            id
-          }
-        }
-      }
     }
   }
 }
 """
+
+PR_BODY_QUERY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      id
+      body
+    }
+  }
+}
+"""
+
+UPDATE_PR_BODY_MUTATION = """
+mutation($prId: ID!, $body: String!) {
+  updatePullRequest(input: {
+    pullRequestId: $prId,
+    body: $body
+  }) {
+    pullRequest {
+      id
+    }
+  }
+}
+"""
+
+
+def execute_with_retry(
+    req: urllib.request.Request, retries: int = 3, backoff: float = 2.0
+) -> bytes:
+    """Executes a urllib request with exponential backoff on transient errors."""
+    for attempt in range(1, retries + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as response:
+                return response.read()
+        except urllib.error.HTTPError as e:
+            # Retry on rate limits (429) or transient server errors (500, 502, 503, 504)
+            if e.code in (403, 429, 500, 502, 503, 504) and attempt < retries:
+                sleep_time = backoff**attempt
+                retry_after_hdr = e.headers.get("Retry-After")
+                if retry_after_hdr and retry_after_hdr.isdigit():
+                    sleep_time = float(retry_after_hdr)
+
+                logging.warning(
+                    "HTTP %s encountered. Retrying in %.1f seconds (Attempt %d/%d)...",
+                    e.code,
+                    sleep_time,
+                    attempt,
+                    retries,
+                )
+                time.sleep(sleep_time)
+                continue
+
+            # Print detailed error and fail immediately for client/auth errors (401, 403, 404, etc.)
+            logging.error(
+                "HTTP Request failed with status %s: %s", e.code, e.read().decode()
+            )
+            sys.exit(1)
+        except urllib.error.URLError as e:
+            # Handle network-level timeouts or connection failures
+            if attempt < retries:
+                sleep_time = backoff**attempt
+                logging.warning(
+                    "Network error (%s). Retrying in %.1f seconds (Attempt %d/%d)...",
+                    e.reason,
+                    sleep_time,
+                    attempt,
+                    retries,
+                )
+                time.sleep(sleep_time)
+                continue
+
+            logging.error(
+                "Network request failed after %d retries: %s", retries, e.reason
+            )
+            sys.exit(1)
+
+    sys.exit(1)
 
 
 def execute_graphql(
@@ -138,14 +206,8 @@ def execute_graphql(
     payload = json.dumps({"query": query, "variables": variables}).encode("utf-8")
     req = urllib.request.Request(GRAPHQL_URL, data=payload, headers=headers)
 
-    try:
-        with urllib.request.urlopen(req) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        logging.error(
-            "GraphQL request failed with status %s: %s", e.code, e.read().decode()
-        )
-        sys.exit(1)
+    raw_data = execute_with_retry(req)
+    result = json.loads(raw_data.decode("utf-8"))
 
     if "errors" in result:
         logging.error("GraphQL errors: %s", result["errors"])
@@ -186,17 +248,55 @@ def create_commit_status(
         url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST"
     )
 
-    try:
-        with urllib.request.urlopen(req) as response:
-            return json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        logging.error(
-            "Failed to post status context '%s' via REST API (%s): %s",
-            context,
-            e.code,
-            e.read().decode(),
+    raw_data = execute_with_retry(req)
+    return json.loads(raw_data.decode("utf-8"))
+
+
+def uncheck_rerun_boxes(
+    owner: str, repo: str, pr_number: int, check_names: List[str], token: str
+):
+    """Fetches the latest PR body right before updating, unchecking all requested boxes at once."""
+    if not check_names:
+        return
+
+    # Fresh fetch of the PR body right before modifying it to eliminate races
+    data = execute_graphql(
+        PR_BODY_QUERY,
+        {"owner": owner, "repo": repo, "number": pr_number},
+        token,
+    )
+
+    pr_node = data["repository"]["pullRequest"]
+    pr_id = pr_node["id"]
+    body_text = pr_node.get("body") or ""
+
+    if not body_text:
+        return
+
+    updated_body = body_text
+    modified = False
+
+    # Iterate through all checks scheduled for this PR and replace '[x]' or '[X]' with '[ ]'
+    for check_name in check_names:
+        pattern = re.compile(
+            rf"\[[xX]\](\s*Re-run\s+test\s+\"{re.escape(check_name)}\")", re.IGNORECASE
         )
-        sys.exit(1)
+        if pattern.search(updated_body):
+            updated_body = pattern.sub(r"[ ]\1", updated_body)
+            modified = True
+            logging.info(
+                "Unticking re-run checkbox for '%s' in PR #%d description...",
+                check_name,
+                pr_number,
+            )
+
+    # Perform a single GraphQL mutation if any boxes were unticked
+    if modified:
+        execute_graphql(
+            UPDATE_PR_BODY_MUTATION,
+            {"prId": pr_id, "body": updated_body},
+            token,
+        )
 
 
 class PRContext:
@@ -212,7 +312,7 @@ class PRContext:
         head_sha: str,
         html_url: str,
         files: List[str],
-        comments_text: str,
+        paged_files: bool,
         body_text: str,
         statuses: Dict[str, Any],
         commit_date: str,
@@ -222,7 +322,7 @@ class PRContext:
         self.head_sha = head_sha
         self.html_url = html_url
         self.files = files
-        self.comments_text = comments_text
+        self.paged_files = paged_files
         self.body_text = body_text
         self.statuses = statuses
         self.commit_date = commit_date
@@ -252,9 +352,6 @@ def fetch_all_pr_contexts_graphql(
                 continue
 
             files = [f["path"] for f in pr_node["files"]["nodes"]]
-            comments = [
-                c["body"] for c in pr_node["comments"]["nodes"] if c.get("body")
-            ]
 
             commit_node = pr_node["commits"]["nodes"][0]["commit"]
             commit_date = commit_node["committedDate"]
@@ -263,9 +360,7 @@ def fetch_all_pr_contexts_graphql(
             statuses = {}
             status_obj = commit_node.get("status")
             if status_obj and status_obj.get("contexts"):
-                for ctx in status_obj["contexts"]:
-                    if ctx["context"] not in statuses:
-                        statuses[ctx["context"]] = ctx
+                statuses = {ctx["context"]: ctx for ctx in status_obj["contexts"]}
 
             contexts.append(
                 PRContext(
@@ -274,7 +369,7 @@ def fetch_all_pr_contexts_graphql(
                     head_sha=pr_node["headRefOid"],
                     html_url=pr_node["url"],
                     files=files,
-                    comments_text="\n".join(comments),
+                    paged_files=pr_node["files"]["pageInfo"]["hasNextPage"],
                     body_text=pr_node["body"] or "",
                     statuses=statuses,
                     commit_date=commit_date,
@@ -287,15 +382,22 @@ def fetch_all_pr_contexts_graphql(
     return contexts
 
 
-def matches_patterns(files: List[str], patterns: List[str]) -> bool:
+def matches_patterns(ctx: PRContext, patterns: List[str]) -> bool:
     """Check if any file matches any pattern using fnmatch-style regex."""
+    if ctx.paged_files:
+        logging.warning(
+            "PR #%s: Blindly match: more than 100 files changed",
+            ctx.number,
+        )
+        return True
+
     logging.debug(
         "matches_pattern() files: %s, patters: %s",
-        ", ".join(files),
+        ", ".join(ctx.files),
         ", ".join(patterns),
     )
 
-    for f in files:
+    for f in ctx.files:
         for p in patterns:
             if fnmatch.fnmatch(f, p):
                 return True
@@ -335,15 +437,6 @@ def evaluate_check_run(
         )
         return False
 
-    # Magic comment check
-    if has_magic_comment(ctx.comments_text, check_name):
-        logging.info(
-            "PR #%s: Found magic comment to rerun '%s'.",
-            ctx.number,
-            check_name,
-        )
-        return True
-
     # Checkbox check in body
     if has_checked_box(ctx.body_text, check_name):
         logging.info(
@@ -354,7 +447,7 @@ def evaluate_check_run(
         return True
 
     # File patterns match AND (never ran OR ran before last commit)
-    if matches_patterns(ctx.files, patterns):
+    if matches_patterns(ctx, patterns):
         if not latest_status:
             logging.info(
                 "PR #%s: Check '%s' has never been run.",
@@ -363,6 +456,7 @@ def evaluate_check_run(
             )
             return True
 
+        # Dates are in ISO-8601 UTC, and thus lexicographical and chronological orders are the same
         if latest_status.get("createdAt", "") < ctx.commit_date:
             logging.info(
                 "PR #%s: Check '%s' ran before last commit date (%s).",
@@ -460,6 +554,15 @@ def list_prs(ctx, config: str, output: str, pr: Tuple[int]):
                 required_checks.append(check_name)
 
         if required_checks:
+            # Untick all checkboxes at once now: doing it in run could lead to even more races
+            uncheck_rerun_boxes(
+                owner=owner,
+                repo=repo_name,
+                pr_number=pr_ctx.number,
+                check_names=required_checks,
+                token=token,
+            )
+
             results[pr_ctx.number] = {
                 "head_sha": pr_ctx.head_sha,
                 "checks_to_run": required_checks,
@@ -509,8 +612,7 @@ def run_check(
 
     pr_node = pr_data["repository"]["pullRequest"]
     head_sha = pr_node["headRefOid"]
-
-    clone_url = pr_node["headRepository"]["url"] + ".git"
+    logging.debug("pr data: %s", pr_node)
 
     def _execute_check(target_dir: str):
         if git_dir:
@@ -527,7 +629,7 @@ def run_check(
                 "clone",
                 "--depth=1",
                 f"--revision={head_sha}",
-                clone_url,
+                f"{pr_data['repository']['url']}.git",
                 target_dir,
             ],
             check=True,
